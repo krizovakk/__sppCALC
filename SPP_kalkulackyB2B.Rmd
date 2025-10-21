@@ -1,0 +1,332 @@
+---
+title: "SPP :: Kalkulacky pro B2B segment"
+author: "Katerina Krizova"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    fig_caption: true
+  fontsize: 11pt
+  geometry: margin=1in
+---
+
+NG = natural gas
+EE = electricity
+
+# SETUP
+
+```{r}
+# ------------------------------------- packages
+
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(lubridate) # prace s datumy
+library(zoo)
+library(shiny) # aplikace
+
+
+# ------------------------------------- paths
+
+path <- "C:/Users/krizova/Documents/R/cenove_kalkukacky/"
+```
+
+## vyber komodity
+
+```{r}
+komo <- "EE"
+# komo <- "ZP"
+```
+
+# PRESVATKOVANI
+
+## LOAD DIAGRAM EE -- done pro oba typy diagramu
+
+diagram musi mit dva sloupce:
+  1. date ve formatu POSIXct
+  2. mwh ve formatu num
+  
+*SAVE:*
+  load = puvodni diagram bez jakychkoliv uprav (--> statistiky?)
+  
+mwh == puvodni hodnota
+mwh_pair == k parovani (reg = reg, sv = nearest reg)
+
+DST:
+now <- diagram %>% filter(date == as.Date("2024-03-31")) # DST - 23h
+fu <- future %>% filter(date == as.Date("2025-03-30")) # DST - 23h OK
+now <- diagram %>% filter(date == as.Date("2024-10-27")) # DST - 25h
+fu <- future %>% filter(date == as.Date("2025-10-26")) # DST - 25h OK
+tr <- diagram %>% filter(date == as.Date("2024-03-29"))
+
+```{r}
+
+load <- read_excel(paste0(path, "Bohemia Sekt_profil 2024_EE - kopie.xlsx"), col_names = T)         # diagram za 2024
+# load <- read_excel(paste0(path, "erbaLachema.xls"), col_names = T)                                  # diagram za 09/24-08-25
+
+diagram <- load %>% 
+  mutate(
+         year = lubridate::year(date),
+         month = lubridate::month(date),
+         week = lubridate::week(date),
+         day = lubridate::day(date),
+         weekday = lubridate::wday(date, week_start = 1),
+         # pair = paste0(str_pad(week, 2, pad = "0"), "_", str_pad(weekday, 2, pad = "0"))
+         md = paste0(month, "-", day),
+         hol = case_when(
+                        md == ("1-1") ~ "novy_rok",
+                         md == ("5-1") ~ "svatek_prace",
+                         md == ("5-8") ~ "konec_valky",
+                         md == ("7-5") ~ "cyril_metod",
+                         md == ("7-6") ~ "jan_hus",
+                         md == ("9-28") ~ "sv_vaclav",
+                         md == ("10-28") ~ "vznik_statu",
+                         md == ("11-17") ~ "den_student",
+                         md == ("12-24") ~ "stedry_den",
+                         md == ("12-25") ~ "bozi_hod",
+                         md == ("12-26") ~ "sv_stepan",
+                         as.Date(date) %in% as.Date(c("2024-03-29", "2025-04-18")) ~ "easter_friday",
+                         as.Date(date) %in% as.Date(c("2024-03-30", "2025-04-19")) ~ "easter_saturday",
+                         as.Date(date) %in% as.Date(c("2024-03-31", "2025-04-20")) ~ "easter_sunday",
+                         as.Date(date) %in% as.Date(c("2024-04-01", "2025-04-21")) ~ "easter_monday", # pridat i ostatni roky ?
+                        TRUE ~ "reg"),
+         mwh_reg = case_when(hol != "reg" & weekday %in% c(6:7) ~ mwh,
+                             hol == "reg" ~ mwh, TRUE ~ NA)
+         ) %>%
+  group_by(date) %>% mutate(hour = seq_along(date)) %>% ungroup() %>%
+  select(hol, date, year, month, week, weekday, hour, mwh, mwh_reg) 
+  # filter(hour == 12)
+
+
+fill_nearest_reg_by_hour <- function(df) {
+  
+  df <- df %>% arrange(hour, date) # ensure day is Date
+  reg_days <- unique(df$date[df$hol == "reg"]) # get unique days and identify which are "reg"
+  df <- df %>%
+    group_by(hour) %>%
+    mutate(
+      mwh_pair = sapply(seq_along(date), function(i) {
+        if (!is.na(mwh_reg[i])) return(mwh_reg[i])  # if not missing, keep it
+        if (length(reg_days) == 0) return(NA)     
+        nearest_day <- reg_days[which.min(abs(as.numeric(date[i] - reg_days)))] # find nearest reg day
+        reg_val <- df$mwh_reg[df$date == nearest_day & df$hour == hour[i] & df$hol == "reg"]   # get value from that reg day & same hour
+        if (length(reg_val) == 0) return(NA)
+        return(reg_val)
+      })) %>%
+    ungroup()
+  df
+}
+
+diagram_upd <- fill_nearest_reg_by_hour(diagram) %>% 
+  arrange(year, date, hour)
+
+diagram_core <- diagram # puvodni diagram (zaloha)
+diagram <- diagram_upd # upraveny diagram (pro praci)
+
+view(diagram)
+rm(diagram_upd)
+  
+```
+
+## SET TIME RANGE -- done
+
+```{r}
+val_y1 <- unique(max(diagram$year))+1 # v pripade, ze nebude diagram za jeden kalendarni rok, ale treba prelom (proto max)
+val_y2 <- unique(max(diagram$year))+2
+val_y3 <- unique(max(diagram$year))+3
+```
+
+## CREATE FUTURE -- done
+
+-- zatim pro roky 2026, 2027, 2028
+
+```{r}
+
+future <- tibble(
+  timestamp = seq(
+    from = as.POSIXct(paste0(val_y1, "-01-01 00:00:00"), tz = "Europe/Prague"),
+    to   = as.POSIXct(paste0(val_y3, "-12-31 23:00:00"), tz = "Europe/Prague"),
+    by   = "hour")) %>% 
+  mutate(
+    date = as_date(timestamp),
+    year = lubridate::year(date),
+    month = lubridate::month(date),
+    week = lubridate::week(date),
+    day = lubridate::day(date),
+    weekday = lubridate::wday(date, week_start = 1),
+    md = paste0(month, "-", day),
+    hol = case_when(
+      md == ("1-1") ~ "novy_rok",
+      md == ("5-1") ~ "svatek_prace",
+      md == ("5-8") ~ "konec_valky",
+      md == ("7-5") ~ "cyril_metod",
+      md == ("7-6") ~ "jan_hus",
+      md == ("9-28") ~ "sv_vaclav",
+      md == ("10-28") ~ "vznik_statu",
+      md == ("11-17") ~ "den_student",
+      md == ("12-24") ~ "stedry_den",
+      md == ("12-25") ~ "bozi_hod",
+      md == ("12-26") ~ "sv_stepan",
+      as.Date(date) %in% as.Date(c("2024-03-29", "2025-04-18", "2026-04-03", "2028-03-26")) ~ "easter_friday",
+      as.Date(date) %in% as.Date(c("2024-03-30", "2025-04-19", "2026-04-04", "2028-03-27")) ~ "easter_saturday",
+      as.Date(date) %in% as.Date(c("2024-03-31", "2025-04-20", "2026-04-05", "2028-03-28")) ~ "easter_sunday",
+      as.Date(date) %in% as.Date(c("2024-04-01", "2025-04-21", "2026-04-06", "2028-03-29")) ~ "easter_monday", # pridat i ostatni roky ?
+      TRUE ~ "reg")) %>% 
+  group_by(date) %>% mutate(hour = seq_along(date)) %>% 
+  ungroup() %>% 
+  select(hol, date, year, month, week, weekday, hour) 
+  # filter(hour == 12) # -------- jen operativne pro prehled - pak smazat
+  
+view(future)
+
+```
+
+## JOIN -- done
+
+
+```{r}
+
+join <- future %>% 
+  left_join(diagram %>% select(week, weekday, hour, mwh_pair), by = c("week", "weekday", "hour")) %>% 
+  rename("mwh" = mwh_pair) 
+
+nrow(future) < nrow(join)
+
+view(join)
+
+```
+
+## KONEC ROKU -- check
+
+-- fill missing values
+
+```{r}
+
+fill <- join %>% 
+  group_by(hour) %>% 
+  mutate(mwh_fill = mwh) %>% 
+  fill(mwh_fill, .direction = "down") %>% 
+  select(hol, date, year, month, week, weekday, hour, "mwh" = mwh_fill)
+
+```
+
+
+## PREPIS SVATKU -- done
+
+pro vsechny vyskyty jednotlivych velikonocnich dni prepise hodnoty z diagramu
+
+```{r}
+
+# levely, pro které chcete přepsat mwh
+to_replace <- c( "novy_rok", 
+                 "easter_friday", "easter_saturday", "easter_sunday", "easter_monday",
+                 "svatek_prace", "konec_valky",
+                 "cyril_metod", "jan_hus",
+                 "sv_vaclav", "vznik_statu", "den_student",
+                 "stedry_den", "bozi_hod", "sv_stepan")
+
+# funkce
+for (lev in to_replace) {
+  fill$mwh[fill$hol == lev] <- diagram$mwh[diagram$hol == lev]
+}
+
+rm(lev)
+rm(to_replace)
+
+```
+
+
+## check excel
+
+```{r}
+write_xlsx(fill, paste0(path, "_Rpresvatkovany_bohemiasekt_2025-2027.xlsx"))
+```
+
+
+## FILTER TIME RANGE -- to do
+
+-- na jake obdobi chceme future?
+
+
+# VYPOCET CENY ZP
+
+FWD krivka:
+  NCG = cena plynu
+  FX rate = fwd kurz eura
+
+```{r}
+
+
+```
+
+
+# ----> APPLICATION
+
+```{r}
+
+ui <- fluidPage(
+  titlePanel("Nahraj Ekcel"),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file", "Nahraj ekcel",
+                accept = c(".xls", ".xlsx")),
+      uiOutput("col_selector")  # Dropdown for choosing a column
+    ),
+    mainPanel(
+      h3("Calculation Result"),
+      textOutput("result")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # Reactive expression to read the uploaded Excel file
+  data <- reactive({
+    req(input$file)  # make sure a file is uploaded
+    read_excel(input$file$datapath)
+  })
+  # Dynamically create column selector after file is uploaded
+  output$col_selector <- renderUI({
+    req(data())
+    selectInput("col", "Choose a numeric column:",
+                choices = names(data()))
+  })
+  
+  # Perform calculation (example: sum of selected column)
+  result_calc <- reactive({
+    req(input$col)
+    col_data <- data()[[input$col]]
+    if (is.numeric(col_data)) {
+      sum(col_data, na.rm = TRUE)
+    } else {
+      NA
+    }
+  })
+  
+  # Display result
+  output$result <- renderText({
+    req(result_calc())
+    paste("Sum of column", input$col, "is:", result_calc())
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
+
+```
+
+
+# --------- experimental section below
+
+```{r}
+spust_skript <- function(cesta) {
+  source(cesta)
+}
+
+spust_skript("C:/Users/krizova/Documents/R/_spp_Rscripts/presvatkovani.R")
+
+```
+

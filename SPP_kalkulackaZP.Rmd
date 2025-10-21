@@ -1,0 +1,171 @@
+---
+title: "SPP kalkulacka pro ZP"
+author: "Katerina Krizova"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    fig_caption: true
+  fontsize: 11pt
+  geometry: margin=1in
+---
+
+# SETUP
+
+```{r}
+
+# ------------------------------------- packages
+
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(lubridate) # prace s datumy
+library(zoo)
+library(shiny) # aplikace
+
+# ------------------------------------- paths
+
+path <- "C:/Users/krizova/Documents/R/cenove_kalkukacky/"
+
+```
+
+# VYPOCET CENY ZP
+
+*profil*
+  - musi obsahovat dva sloupce:
+    datum
+    profil v MWh
+  - dopocitavam pole mesic a rok pro nasledujicu vypocty
+
+*fwd*
+  - forwardova krivka, kterou kazdy den posila SK
+  - zatim upravena v xlsx
+  - puvodni aktualizovana na X se nacita nejak podivne
+  - musi obsahovat tri sloupce:
+    mesic
+    NCG = cena plynu (EUR/MWh)
+    FX rate = fwd kurz eura
+    
+*OTC ceny*
+  - ziva data z trayportu
+  - nacist ???
+    - potrebujeme 3 udaje (ceny Cal-XX na VTP-CZ)
+    
+*low_spot, aktual_spot*
+  - low: kolik se traduje CZK - EUR -- *doplnujeme my*
+  - aktual: low + 40 centu, pokryva nase riziko pohynbu forwardove krivky 
+  
+*surcharge*
+   - ?
+  
+**Data_Vstup**
+  - simulujeme tabulku na listu Data_Vstup v puvodni kalkulace
+  - join = spojeni profilu a forwardove krivky
+  - sloupce
+      PFC = kurz ceny ZP -- *mame z fwd_krivky*
+      PFCratio = podil ceny v ramci roku -- *pocitame*
+      PFCprepoc = prepocet PFC za pomoci OTC ceny -- *pocitame*
+
+## vstupy
+
+Priprava vstupu z ruznych zdroju (viz vyse)
+
+```{r}
+
+profil <- read_excel(paste0(path, "vstupy/cvicny_26_27.xlsx"), col_names = T) %>% 
+  mutate(mesic = lubridate::month(datum),
+         rok = lubridate::year(datum)) %>% 
+  select(datum, rok, mesic, profilMWh)
+
+fwd <- read_excel(paste0(path, "vstupy/trans_001_FWD_SPP-CZ_KAM_Aktual.xlsx"), sheet = "List1") %>% 
+  rename("PFC" = NCG, "FX" = 'FX rate')
+
+trayport <- "X:/Nakup _ NEW/02_Trayport_Ceny/Data_Trayport_Live.xlsx"
+
+cal26 <- read_excel(trayport, sheet = "Output", range = "P22", col_names = FALSE)[[1]]
+cal27 <- read_excel(trayport, sheet = "Output", range = "P23", col_names = FALSE)[[1]]
+cal28 <- read_excel(trayport, sheet = "Output", range = "P24", col_names = FALSE)[[1]]
+cal29 <- read_excel(trayport, sheet = "Output", range = "P25", col_names = FALSE)[[1]]
+
+low_spot <- 24.25
+aktual_spot <- low_spot + 0.4
+surcharge <- 0.05 # ---------------------------------- ???
+
+```
+
+## data_vstup
+
+Priprava dat pro samotny vypocet.
+
+```{r}
+
+join <- profil %>% 
+  left_join(fwd, by = c("datum" = "mesic")) %>% 
+  group_by(rok) %>% 
+  mutate(PFCratio = PFC/mean(PFC),
+         PFCprepoc = round(case_when(rok == 2026 ~ PFCratio*cal26,
+                               rok == 2027 ~ PFCratio*cal27,
+                               rok == 2028 ~ PFCratio*cal28,
+                               rok == 2029 ~ PFCratio*cal29, TRUE ~ NA), 3),
+         swapPoint = (FX-low_spot)*1000,
+         cenaEUR = round(profilMWh*PFCprepoc, 0),
+         FXrecalc = aktual_spot+swapPoint/1000+surcharge,
+         vazenaCena = profilMWh*FXrecalc) %>% 
+  ungroup()
+
+data_vstup <- join # final df
+rm(join)
+```
+
+## Kalulace
+
+Vypocet fixni ceny.
+
+### Vypocet
+
+```{r}
+
+# vypocty pod tabulkou
+
+suma_profil <- sum(data_vstup$profilMWh)
+suma_cenaEUR <- sum(data_vstup$cenaEUR)
+suma_vazenaCena <- sum(data_vstup$vazenaCena)
+mean_PFC <- mean(data_vstup$PFCprepoc)
+nakup <- suma_cenaEUR/suma_profil
+prirazka_nakup <- 0.000 # ---------------------------------- ???
+kurz <- round(suma_vazenaCena/suma_profil, 2)
+prodej_eur <- nakup+prirazka_nakup
+prodej_czk <- prodej_eur*kurz
+
+# vypocty nad tabulkou
+
+naklad_profil <- round(nakup-mean_PFC, 3)
+fin_cenaEUR <- ceiling(prodej_eur/0.025)*0.025 # zaokrouhleni na nejblizsi nejvyssi hranici 0,025 
+fin_cenaCZK <- ceiling((fin_cenaEUR*kurz)/0.05)*0.05 # zaokrouhleni na nejblizsi nejvyssi hranici 0,05 
+
+# dodaci obdobi
+
+od <- min(profil$datum)
+do <- max(profil$datum)+months(1)
+
+```
+
+### Vysledek
+
+```{r}
+
+fix_cena <- data.frame(
+  Od = od,
+  Do = do,
+  `Cena EUR` = fin_cenaEUR,
+  `Cena CZK` = fin_cenaCZK,
+  `Naklad na profil` = naklad_profil,
+  check.names = FALSE # aby nebyly v nazvu sloupcu misto mezer tecky
+)
+
+print(fix_cena)
+
+```
+
