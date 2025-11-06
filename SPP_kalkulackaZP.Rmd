@@ -27,7 +27,7 @@ library(shiny) # aplikace
 
 # ------------------------------------- paths
 
-path <- "C:/Users/krizova/Documents/R/cenove_kalkukacky/"
+path <- "C:/Users/krizova/Documents/R/02 cenove_kalkukacky/"
 
 ```
 
